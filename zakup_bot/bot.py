@@ -47,6 +47,7 @@ HELP = """Я раскладываю списки закупок по поста�
 /price Поставщик — загрузить прайс (в личке)
 /done — закончить загрузку прайса
 /prices — какие прайсы загружены
+/find слово — найти позицию в прайсах (как она записана и почём)
 /delprice Поставщик — удалить прайс"""
 
 
@@ -86,6 +87,7 @@ class App:
         r.message.register(self.cmd_done, Command("done"))
         r.message.register(self.cmd_prices, Command("prices"))
         r.message.register(self.cmd_delprice, Command("delprice"))
+        r.message.register(self.cmd_find, Command("find"))
         r.message.register(self.cmd_itog, Command("itog"))
         r.message.register(self.cmd_list, Command("list"))
         r.message.register(self.cmd_clear, Command("clear"))
@@ -221,6 +223,22 @@ class App:
             return
         text = "Загруженные прайсы:\n" + "\n".join(f"• {s} — {n} поз." for s, n in rows)
         await message.answer(text)
+
+    async def cmd_find(self, message: Message, command: CommandObject) -> None:
+        words = (command.args or "").casefold().split()
+        if not words:
+            await message.answer("Напишите, что искать: /find лайн брю")
+            return
+        found = [c for c in self.db.catalog() if all(w in c.name.casefold() for w in words)]
+        if not found:
+            await message.answer("В прайсах ничего не нашлось.")
+            return
+        lines = [f"Нашлось: {len(found)}" + (" (первые 30)" if len(found) > 30 else "")]
+        for c in found[:30]:
+            unit = c.unit or "ед."
+            lines.append(f"• {c.supplier}: {c.name} — {fmt_money(c.price)} за {unit}")
+        for chunk in _pack(["\n".join(lines)]):
+            await message.answer(chunk)
 
     async def cmd_delprice(self, message: Message, command: CommandObject) -> None:
         if not self.is_admin(message.from_user.id):
@@ -457,6 +475,7 @@ async def _run(bot: Bot, dp: Dispatcher) -> None:
             BotCommand(command="price", description="Загрузить прайс (в личке)"),
             BotCommand(command="done", description="Закончить загрузку прайса"),
             BotCommand(command="prices", description="Загруженные прайсы"),
+            BotCommand(command="find", description="Найти позицию в прайсах"),
             BotCommand(command="delprice", description="Удалить прайс"),
             BotCommand(command="help", description="Как пользоваться"),
         ]
