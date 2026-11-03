@@ -122,6 +122,11 @@ class App:
         if not s:
             await message.answer("Сейчас прайс не загружается.")
             return
+        if not s.added:
+            await message.answer(
+                f"Прайс «{s.supplier}» не загрузился, прежний прайс (если был) остался как есть."
+            )
+            return
         await message.answer(f"Готово: у «{s.supplier}» в базе {plural(s.added, 'позиция', 'позиции', 'позиций')}.")
 
     async def on_private_content(self, message: Message) -> None:
@@ -154,9 +159,14 @@ class App:
         if not chunks:
             await message.answer("В файле не нашлось данных.")
             return
-        status = await message.answer(f"Читаю прайс «{s.supplier}»…")
+        parts = f", {plural(len(chunks), 'часть', 'части', 'частей')}" if len(chunks) > 1 else ""
+        status = await message.answer(f"Читаю прайс «{s.supplier}»{parts}… Это может занять пару минут.")
+
+        async def progress(done: int, total: int) -> None:
+            await status.edit_text(f"Читаю прайс «{s.supplier}»: готово {done} из {total}…")
+
         try:
-            items = await self.ai.extract_prices(chunks, filename)
+            items = await self.ai.extract_prices(chunks, filename, progress)
         except AIError as e:
             await status.edit_text(f"Не получилось прочитать прайс: {e}")
             return
@@ -325,7 +335,9 @@ async def main() -> None:
     if not config.admin_ids:
         log.warning("ADMIN_IDS не задан: загружать прайсы и делать /itog может любой.")
     if config.ai == "gemini":
-        ai: AIClient = Gemini(config.model, config.gemini_api_key)
+        ai: AIClient = Gemini(
+            config.model, config.gemini_api_key, fallback_model=config.gemini_fallback_model
+        )
     else:
         ai = Claude(config.model)
     log.info("ИИ: %s (%s)", ai.name, config.model)

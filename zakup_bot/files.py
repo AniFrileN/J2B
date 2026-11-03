@@ -5,6 +5,8 @@ import io
 from dataclasses import dataclass
 
 ROWS_PER_CHUNK = 250
+PDF_PAGES_PER_CHUNK = 8
+MAX_PART_BYTES = 14 * 1024 * 1024  # больше — режем на меньшие части
 
 IMAGE_TYPES = {
     "jpg": "image/jpeg",
@@ -26,6 +28,7 @@ class PriceChunk:
     text: str | None = None
     data: bytes | None = None
     mime: str | None = None
+    label: str = ""  # например «стр. 9–16»
 
 
 def _ext(filename: str) -> str:
@@ -111,6 +114,41 @@ def text_chunks(text: str) -> list[PriceChunk]:
     return _chunk_rows(lines)
 
 
+def _pdf(data: bytes) -> list[PriceChunk]:
+    """Большой PDF режем по страницам: так меньше запрос и короче ответ ИИ."""
+    whole = [PriceChunk(data=data, mime="application/pdf")]
+    try:
+        from pypdf import PdfReader, PdfWriter
+
+        reader = PdfReader(io.BytesIO(data))
+        total = len(reader.pages)
+    except Exception:
+        return whole
+    if total <= PDF_PAGES_PER_CHUNK and len(data) <= MAX_PART_BYTES:
+        return whole
+
+    def build(start: int, end: int) -> bytes:
+        writer = PdfWriter()
+        for i in range(start, end):
+            writer.add_page(reader.pages[i])
+        buf = io.BytesIO()
+        writer.write(buf)
+        return buf.getvalue()
+
+    def split(start: int, end: int) -> list[PriceChunk]:
+        part = build(start, end)
+        if len(part) > MAX_PART_BYTES and end - start > 1:
+            mid = (start + end) // 2
+            return split(start, mid) + split(mid, end)
+        label = f"стр. {start + 1}" if end - start == 1 else f"стр. {start + 1}–{end}"
+        return [PriceChunk(data=part, mime="application/pdf", label=label)]
+
+    chunks: list[PriceChunk] = []
+    for start in range(0, total, PDF_PAGES_PER_CHUNK):
+        chunks.extend(split(start, min(total, start + PDF_PAGES_PER_CHUNK)))
+    return chunks
+
+
 def price_chunks(filename: str, data: bytes, mime: str | None = None) -> list[PriceChunk]:
     ext = _ext(filename)
     if ext in ("xlsx", "xlsm"):
@@ -122,7 +160,7 @@ def price_chunks(filename: str, data: bytes, mime: str | None = None) -> list[Pr
     if ext == "txt":
         return text_chunks(decode_text(data))
     if ext == "pdf" or mime == "application/pdf":
-        return [PriceChunk(data=data, mime="application/pdf")]
+        return _pdf(data)
     media = IMAGE_TYPES.get(ext) or (mime if mime in IMAGE_TYPES.values() else None)
     if media:
         return [PriceChunk(data=data, mime=media)]

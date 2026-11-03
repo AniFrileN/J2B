@@ -25,6 +25,7 @@ class Config:
     db_path: str
     gemini_api_key: str = ""
     currency: str = "₸"
+    gemini_fallback_model: str = ""
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -57,4 +58,5 @@ class Config:
             db_path=env("DB_PATH", "").strip() or "zakup.db",
             gemini_api_key=env("GEMINI_API_KEY", "").strip(),
             currency=env("CURRENCY", "").strip() or "₸",
+            gemini_fallback_model=env("GEMINI_FALLBACK_MODEL", "gemini-3.5-flash-lite").strip(),
         )

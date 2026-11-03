@@ -204,6 +204,68 @@ def test_gemini_requests_and_retry():
         asyncio.run(gemini.match_order(CATALOG, [PendingMessage(1, "Иван", "лук")]))
 
 
+def test_gemini_overload_falls_back_and_uploads_big_files():
+    from google.genai import errors
+
+    busy = errors.ServerError(503, {"error": {"code": 503, "message": "high demand", "status": "UNAVAILABLE"}})
+    models = FakeGeminiModels([busy, busy, {"items": [{"name": "Сыр", "unit": "кг", "price": 3000}]}])
+    uploads, deleted = [], []
+
+    async def upload(file, config):
+        uploads.append((len(file.read()), config["mime_type"]))
+        return SimpleNamespace(name="files/1", uri="https://files/1")
+
+    async def delete(name):
+        deleted.append(name)
+
+    files_api = SimpleNamespace(upload=upload, delete=delete)
+    gemini = Gemini(
+        "gemini-3.8-flash", "key", fallback_model="gemini-3.5-flash-lite",
+        client=SimpleNamespace(aio=SimpleNamespace(models=models, files=files_api)),
+    )
+    gemini.retry_delays = (0,)
+    gemini.upload_over = 10
+    progress = []
+
+    async def on_progress(done, total):
+        progress.append((done, total))
+
+    from zakup_bot.files import PriceChunk
+    chunk = PriceChunk(data=b"x" * 50, mime="application/pdf", label="стр. 1–8")
+    items = asyncio.run(gemini.extract_prices([chunk], "big.pdf", on_progress))
+    assert items == [{"name": "Сыр", "unit": "кг", "price": 3000.0}]
+    assert [c[0] for c in models.calls] == ["gemini-3.8-flash", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    assert uploads == [(50, "application/pdf")] and deleted == ["files/1"]
+    assert models.calls[-1][1][0].file_data.file_uri == "https://files/1"
+    assert "стр. 1–8" in models.calls[-1][1][1].text
+
+    models = FakeGeminiModels([busy] * 4)
+    gemini = Gemini("gemini-3.8-flash", "key", fallback_model="gemini-3.5-flash-lite",
+                    client=SimpleNamespace(aio=SimpleNamespace(models=models)))
+    gemini.retry_delays = (0,)
+    with pytest.raises(AIError, match="перегружены"):
+        asyncio.run(gemini.match_order(CATALOG, [PendingMessage(1, "Иван", "лук")]))
+
+
+def test_big_pdf_is_split_by_pages():
+    from pypdf import PdfReader, PdfWriter
+
+    w = PdfWriter()
+    for _ in range(20):
+        w.add_blank_page(width=200, height=200)
+    buf = io.BytesIO()
+    w.write(buf)
+    chunks = price_chunks("big.pdf", buf.getvalue())
+    assert [c.label for c in chunks] == ["стр. 1–8", "стр. 9–16", "стр. 17–20"]
+    assert [len(PdfReader(io.BytesIO(c.data)).pages) for c in chunks] == [8, 8, 4]
+
+    small = io.BytesIO()
+    w2 = PdfWriter()
+    w2.add_blank_page(width=200, height=200)
+    w2.write(small)
+    assert len(price_chunks("one.pdf", small.getvalue())) == 1
+
+
 def test_pack_and_money():
     parts = _pack(["a" * 3000, "b" * 3000, "c" * 9000])
     assert all(len(p) <= 4000 for p in parts)

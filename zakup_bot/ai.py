@@ -4,7 +4,9 @@ import asyncio
 import base64
 import copy
 import json
+import io
 import logging
+from collections.abc import Awaitable, Callable
 
 from .files import PriceChunk
 from .models import CatalogItem, PendingMessage
@@ -13,6 +15,8 @@ log = logging.getLogger(__name__)
 
 # Часть запроса: текст или файл (байты + MIME-тип).
 Part = str | PriceChunk
+
+Progress = Callable[[int, int], Awaitable[None]]
 
 # Модели Claude, которые принимают серверный fallback при отказе.
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-sonnet-5-5"}
@@ -110,19 +114,35 @@ class AIClient:
     async def _json(self, system: str, parts: list[Part], schema: dict) -> dict:
         raise NotImplementedError
 
-    async def extract_prices(self, chunks: list[PriceChunk], filename: str) -> list[dict]:
+    async def extract_prices(
+        self, chunks: list[PriceChunk], filename: str, progress: Progress | None = None
+    ) -> list[dict]:
         sem = asyncio.Semaphore(self.concurrency)
+        done = 0
 
         async def one(i: int, chunk: PriceChunk) -> list[dict]:
+            nonlocal done
             if chunk.data is not None:
-                parts: list[Part] = [chunk, "Извлеки позиции из этого прайса."]
+                where = f" ({chunk.label})" if chunk.label else ""
+                parts: list[Part] = [chunk, f"Извлеки позиции из этого прайса{where}."]
             else:
                 parts = [f"Прайс «{filename}», часть {i + 1} из {len(chunks)}:\n\n{chunk.text}"]
             async with sem:
                 data = await self._json(PRICE_SYSTEM, parts, PRICE_SCHEMA)
+            done += 1
+            if progress and len(chunks) > 1:
+                try:
+                    await progress(done, len(chunks))
+                except Exception:
+                    log.debug("progress update failed", exc_info=True)
             return data.get("items") or []
 
-        results = await asyncio.gather(*(one(i, c) for i, c in enumerate(chunks)))
+        results = await asyncio.gather(
+            *(one(i, c) for i, c in enumerate(chunks)), return_exceptions=True
+        )
+        for r in results:
+            if isinstance(r, BaseException):
+                raise r
         items = []
         for part in results:
             for it in part:
@@ -246,25 +266,35 @@ def _gemini_schema(schema: dict) -> dict:
 class Gemini(AIClient):
     name = "Gemini"
     concurrency = 2  # бесплатный тариф ограничивает число запросов в минуту
-    retry_delays = (20, 60)
+    retry_delays = (15, 45)  # паузы перед повторами на одной модели, сек
+    transient = {429, 500, 502, 503, 504}
+    upload_over = 14 * 1024 * 1024  # файлы больше — через Files API
 
-    def __init__(self, model: str, api_key: str, client=None):
+    def __init__(self, model: str, api_key: str, client=None, fallback_model: str = ""):
         if client is None:
             from google import genai
 
             client = genai.Client(api_key=api_key)
         self.model = model
+        self.fallback_model = fallback_model
         self.client = client
 
-    @staticmethod
-    def _contents(parts: list[Part]) -> list:
+    async def _contents(self, parts: list[Part], uploaded: list[str]) -> list:
         from google.genai import types
 
-        return [
-            types.Part.from_text(text=p) if isinstance(p, str)
-            else types.Part.from_bytes(data=p.data, mime_type=p.mime)
-            for p in parts
-        ]
+        contents = []
+        for p in parts:
+            if isinstance(p, str):
+                contents.append(types.Part.from_text(text=p))
+            elif len(p.data) > self.upload_over:
+                f = await self.client.aio.files.upload(
+                    file=io.BytesIO(p.data), config={"mime_type": p.mime}
+                )
+                uploaded.append(f.name)
+                contents.append(types.Part.from_uri(file_uri=f.uri, mime_type=p.mime))
+            else:
+                contents.append(types.Part.from_bytes(data=p.data, mime_type=p.mime))
+        return contents
 
     async def _json(self, system: str, parts: list[Part], schema: dict) -> dict:
         from google.genai import errors, types
@@ -274,29 +304,57 @@ class Gemini(AIClient):
             response_mime_type="application/json",
             response_json_schema=_gemini_schema(schema),
         )
-        contents = self._contents(parts)
-        for attempt in range(len(self.retry_delays) + 1):
-            try:
-                response = await self.client.aio.models.generate_content(
-                    model=self.model, contents=contents, config=config
-                )
-                break
-            except errors.APIError as e:
-                if e.code == 429 and attempt < len(self.retry_delays):
-                    log.warning("Gemini: лимит запросов, жду %s с", self.retry_delays[attempt])
-                    await asyncio.sleep(self.retry_delays[attempt])
-                    continue
-                if e.code == 429:
-                    raise AIError(
-                        "Исчерпан лимит бесплатного Gemini. Подождите (дневной лимит "
-                        "сбрасывается ночью) или переключитесь на Claude в .env."
-                    ) from e
-                if e.code in (400, 401, 403) and "API key" in str(e):
-                    raise AIError("Неверный ключ Gemini (GEMINI_API_KEY).") from e
-                raise AIError(f"Ошибка Gemini ({e.code}): {e.message}") from e
-            except OSError as e:
-                raise AIError("Нет связи с Gemini. Проверьте интернет.") from e
+        models = [self.model]
+        if self.fallback_model and self.fallback_model != self.model:
+            models.append(self.fallback_model)
 
+        uploaded: list[str] = []
+        last: errors.APIError | None = None
+        try:
+            contents = await self._contents(parts, uploaded)
+            for model in models:
+                for delay in (0, *self.retry_delays):
+                    if delay:
+                        await asyncio.sleep(delay)
+                    try:
+                        response = await self.client.aio.models.generate_content(
+                            model=model, contents=contents, config=config
+                        )
+                        return self._result(response)
+                    except errors.APIError as e:
+                        if e.code not in self.transient:
+                            raise self._error(e) from e
+                        last = e
+                        log.warning("Gemini %s: ошибка %s, повторю", model, e.code)
+        except errors.APIError as e:
+            raise self._error(e) from e
+        except OSError as e:
+            raise AIError("Нет связи с Gemini. Проверьте интернет.") from e
+        finally:
+            for name in uploaded:
+                try:
+                    await self.client.aio.files.delete(name=name)
+                except Exception:
+                    log.debug("не удалось удалить файл %s", name, exc_info=True)
+
+        if last is not None and last.code == 429:
+            raise AIError(
+                "Исчерпан лимит бесплатного Gemini. Подождите (дневной лимит "
+                "сбрасывается ночью) или переключитесь на Claude в .env."
+            ) from last
+        raise AIError(
+            "Серверы Gemini сейчас перегружены. Попробуйте через 10–15 минут "
+            "или переключитесь на Claude в .env."
+        ) from last
+
+    @staticmethod
+    def _error(e) -> AIError:
+        if e.code in (400, 401, 403) and "API key" in str(e):
+            return AIError("Неверный ключ Gemini (GEMINI_API_KEY).")
+        return AIError(f"Ошибка Gemini ({e.code}): {e.message}")
+
+    @staticmethod
+    def _result(response) -> dict:
         candidate = (response.candidates or [None])[0]
         reason = getattr(candidate, "finish_reason", None)
         reason = getattr(reason, "name", reason)
