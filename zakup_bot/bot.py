@@ -8,6 +8,7 @@ from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BotCommand, BufferedInputFile, Message
 
@@ -332,6 +333,16 @@ async def main() -> None:
     bot = Bot(config.bot_token)
     dp = Dispatcher()
     dp.include_router(app.router)
+    try:
+        await _run(bot, dp)
+    except TelegramUnauthorizedError:
+        log.error("Telegram не принял BOT_TOKEN: проверьте токен в .env")
+        raise SystemExit(1)
+    finally:
+        await bot.session.close()
+
+
+async def _run(bot: Bot, dp: Dispatcher) -> None:
     await bot.set_my_commands(
         [
             BotCommand(command="itog", description="Собрать заказ по поставщикам"),

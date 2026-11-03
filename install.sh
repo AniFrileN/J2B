@@ -124,9 +124,9 @@ fi
 cat <<EOF
 
 Полезные команды:
-  systemctl status $SVC                 — работает ли бот
-  journalctl -u $SVC -f                 — журнал (выход Ctrl+C)
-  nano $DIR/.env                        — поменять настройки, затем:
-  systemctl restart $SVC                — перезапуск
+  systemctl status $SVC      — работает ли бот
+  journalctl -u $SVC -f      — журнал (выход Ctrl+C)
+  nano $DIR/.env       — поменять настройки, затем
+  systemctl restart $SVC     — перезапуск
 Обновить бота: запустите команду установки ещё раз.
 EOF
