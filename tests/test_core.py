@@ -238,6 +238,8 @@ def test_gemini_overload_falls_back_and_uploads_big_files():
     assert uploads == [(50, "application/pdf")] and deleted == ["files/1"]
     assert models.calls[-1][1][0].file_data.file_uri == "https://files/1"
     assert "стр. 1–8" in models.calls[-1][1][1].text
+    assert models.calls[0][2].thinking_config.thinking_level.name == "LOW"
+    assert models.calls[-1][2].thinking_config is None  # запасная модель — без особых настроек
 
     models = FakeGeminiModels([busy] * 4)
     gemini = Gemini("gemini-3.8-flash", "key", fallback_model="gemini-3.5-flash-lite",
@@ -281,3 +283,24 @@ def test_plural():
     assert plural(2, "позиция", "позиции", "позиций") == "2 позиции"
     assert plural(11, "позиция", "позиции", "позиций") == "11 позиций"
     assert plural(25, "позиция", "позиции", "позиций") == "25 позиций"
+
+
+def test_gemini_hung_request_is_retried():
+    class Slow(FakeGeminiModels):
+        async def generate_content(self, model, contents, config):
+            if not self.calls:
+                self.calls.append(model)
+                await asyncio.sleep(5)
+            self.calls.append(model)
+            return SimpleNamespace(
+                candidates=[SimpleNamespace(finish_reason=SimpleNamespace(name="STOP"))],
+                text=json.dumps({"lines": []}),
+            )
+
+    models = Slow([])
+    gemini = Gemini("gemini-3.8-flash", "key", client=SimpleNamespace(aio=SimpleNamespace(models=models)))
+    gemini.retry_delays = (0,)
+    gemini.request_timeout = 0.05
+    assert asyncio.run(gemini.match_order(CATALOG, [PendingMessage(1, "Иван", "лук")])) == []
+    assert len(models.calls) == 2
+    assert models.calls  # order request does not use fast mode

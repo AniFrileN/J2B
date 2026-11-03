@@ -111,7 +111,8 @@ class AIClient:
     name = "ИИ"
     concurrency = 4
 
-    async def _json(self, system: str, parts: list[Part], schema: dict) -> dict:
+    async def _json(self, system: str, parts: list[Part], schema: dict, fast: bool = False) -> dict:
+        """fast=True — механическая работа (чтение прайса), можно меньше «думать»."""
         raise NotImplementedError
 
     async def extract_prices(
@@ -128,7 +129,7 @@ class AIClient:
             else:
                 parts = [f"Прайс «{filename}», часть {i + 1} из {len(chunks)}:\n\n{chunk.text}"]
             async with sem:
-                data = await self._json(PRICE_SYSTEM, parts, PRICE_SCHEMA)
+                data = await self._json(PRICE_SYSTEM, parts, PRICE_SCHEMA, fast=True)
             done += 1
             if progress and len(chunks) > 1:
                 try:
@@ -210,7 +211,7 @@ class Claude(AIClient):
             )
         return content
 
-    async def _json(self, system: str, parts: list[Part], schema: dict) -> dict:
+    async def _json(self, system: str, parts: list[Part], schema: dict, fast: bool = False) -> dict:
         import anthropic
 
         kwargs = {}
@@ -224,7 +225,7 @@ class Claude(AIClient):
                 messages=[{"role": "user", "content": self._content(parts)}],
                 thinking={"type": "adaptive"},
                 output_config={
-                    "effort": "medium",
+                    "effort": "low" if fast else "medium",
                     "format": {"type": "json_schema", "schema": schema},
                 },
                 **kwargs,
@@ -269,6 +270,7 @@ class Gemini(AIClient):
     retry_delays = (15, 45)  # паузы перед повторами на одной модели, сек
     transient = {429, 500, 502, 503, 504}
     upload_over = 14 * 1024 * 1024  # файлы больше — через Files API
+    request_timeout = 240  # сек; дольше — считаем, что запрос завис, и повторяем
 
     def __init__(self, model: str, api_key: str, client=None, fallback_model: str = ""):
         if client is None:
@@ -296,20 +298,28 @@ class Gemini(AIClient):
                 contents.append(types.Part.from_bytes(data=p.data, mime_type=p.mime))
         return contents
 
-    async def _json(self, system: str, parts: list[Part], schema: dict) -> dict:
+    async def _json(self, system: str, parts: list[Part], schema: dict, fast: bool = False) -> dict:
         from google.genai import errors, types
 
-        config = types.GenerateContentConfig(
-            system_instruction=system,
-            response_mime_type="application/json",
-            response_json_schema=_gemini_schema(schema),
-        )
+        def config_for(model: str):
+            extra = {}
+            # Быстрый режим без долгих раздумий — только для основной модели,
+            # у которой он точно поддерживается.
+            if fast and model == self.model:
+                extra["thinking_config"] = types.ThinkingConfig(thinking_level="LOW")
+            return types.GenerateContentConfig(
+                system_instruction=system,
+                response_mime_type="application/json",
+                response_json_schema=_gemini_schema(schema),
+                **extra,
+            )
+
         models = [self.model]
         if self.fallback_model and self.fallback_model != self.model:
             models.append(self.fallback_model)
 
         uploaded: list[str] = []
-        last: errors.APIError | None = None
+        last: Exception | None = None
         try:
             contents = await self._contents(parts, uploaded)
             for model in models:
@@ -317,10 +327,16 @@ class Gemini(AIClient):
                     if delay:
                         await asyncio.sleep(delay)
                     try:
-                        response = await self.client.aio.models.generate_content(
-                            model=model, contents=contents, config=config
+                        response = await asyncio.wait_for(
+                            self.client.aio.models.generate_content(
+                                model=model, contents=contents, config=config_for(model)
+                            ),
+                            timeout=self.request_timeout,
                         )
                         return self._result(response)
+                    except asyncio.TimeoutError as e:
+                        last = e
+                        log.warning("Gemini %s: нет ответа %s с, повторю", model, self.request_timeout)
                     except errors.APIError as e:
                         if e.code not in self.transient:
                             raise self._error(e) from e
@@ -337,7 +353,7 @@ class Gemini(AIClient):
                 except Exception:
                     log.debug("не удалось удалить файл %s", name, exc_info=True)
 
-        if last is not None and last.code == 429:
+        if getattr(last, "code", None) == 429:
             raise AIError(
                 "Исчерпан лимит бесплатного Gemini. Подождите (дневной лимит "
                 "сбрасывается ночью) или переключитесь на Claude в .env."
