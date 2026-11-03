@@ -5,6 +5,9 @@ import math
 from .models import CatalogItem, OrderRow, Plan, Unmatched
 
 
+CURRENCY = "₸"  # меняется из настроек (CURRENCY в .env)
+
+
 def fmt_num(x: float) -> str:
     if math.isclose(x, round(x)):
         return f"{int(round(x)):,}".replace(",", " ")
@@ -12,7 +15,7 @@ def fmt_num(x: float) -> str:
 
 
 def fmt_money(x: float | None) -> str:
-    return "—" if x is None else f"{fmt_num(round(x, 2))} ₽"
+    return "—" if x is None else f"{fmt_num(round(x, 2))} {CURRENCY}"
 
 
 def build_plan(lines: list[dict], catalog: list[CatalogItem]) -> Plan:

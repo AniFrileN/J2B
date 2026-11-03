@@ -11,11 +11,12 @@ from aiogram.enums import ChatType
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import BotCommand, BufferedInputFile, Message
 
-from .ai import AIError, Claude
+from .ai import AIClient, AIError, Claude, Gemini
 from .config import Config
 from .db import DB
 from .excel import build_workbook
 from .files import UnsupportedFile, price_chunks, text_chunks
+from . import planner
 from .planner import build_plan, fmt_money, supplier_messages
 
 log = logging.getLogger(__name__)
@@ -49,10 +50,10 @@ class PriceSession:
 
 
 class App:
-    def __init__(self, config: Config, db: DB, claude: Claude):
+    def __init__(self, config: Config, db: DB, ai: AIClient):
         self.config = config
         self.db = db
-        self.claude = claude
+        self.ai = ai
         self.sessions: dict[int, PriceSession] = {}
         self.busy_chats: set[int] = set()
         self.router = Router()
@@ -154,7 +155,7 @@ class App:
             return
         status = await message.answer(f"Читаю прайс «{s.supplier}»…")
         try:
-            items = await self.claude.extract_prices(chunks, filename)
+            items = await self.ai.extract_prices(chunks, filename)
         except AIError as e:
             await status.edit_text(f"Не получилось прочитать прайс: {e}")
             return
@@ -252,7 +253,7 @@ class App:
         self.busy_chats.add(chat_id)
         status = await message.answer(f"Разбираю {plural(len(pending), 'сообщение', 'сообщения', 'сообщений')}…")
         try:
-            lines = await self.claude.match_order(catalog, pending)
+            lines = await self.ai.match_order(catalog, pending)
             plan = build_plan(lines, catalog)
             if not plan.by_supplier and not plan.unmatched:
                 await status.edit_text("Не нашёл в сообщениях ни одной позиции для заказа.")
@@ -319,9 +320,15 @@ def _pack(texts: list[str]) -> list[str]:
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     config = Config.from_env()
+    planner.CURRENCY = config.currency
     if not config.admin_ids:
         log.warning("ADMIN_IDS не задан: загружать прайсы и делать /itog может любой.")
-    app = App(config, DB(config.db_path), Claude(config.model))
+    if config.ai == "gemini":
+        ai: AIClient = Gemini(config.model, config.gemini_api_key)
+    else:
+        ai = Claude(config.model)
+    log.info("ИИ: %s (%s)", ai.name, config.model)
+    app = App(config, DB(config.db_path), ai)
     bot = Bot(config.bot_token)
     dp = Dispatcher()
     dp.include_router(app.router)

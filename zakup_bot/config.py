@@ -20,23 +20,41 @@ def load_dotenv(path: str = ".env") -> None:
 class Config:
     bot_token: str
     admin_ids: frozenset[int]
+    ai: str  # "gemini" или "claude"
     model: str
     db_path: str
+    gemini_api_key: str = ""
+    currency: str = "₸"
 
     @classmethod
     def from_env(cls) -> "Config":
         load_dotenv()
-        token = os.environ.get("BOT_TOKEN", "").strip()
+        env = os.environ.get
+        token = env("BOT_TOKEN", "").strip()
         if not token:
             raise SystemExit("Не задан BOT_TOKEN (см. .env.example)")
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            raise SystemExit("Не задан ANTHROPIC_API_KEY (см. .env.example)")
+
+        ai = env("AI", "gemini").strip().lower()
+        if ai == "gemini":
+            if not env("GEMINI_API_KEY", "").strip():
+                raise SystemExit("AI=gemini, но не задан GEMINI_API_KEY (см. .env.example)")
+            model = env("GEMINI_MODEL", "").strip() or "gemini-3.8-flash"
+        elif ai == "claude":
+            if not env("ANTHROPIC_API_KEY", "").strip():
+                raise SystemExit("AI=claude, но не задан ANTHROPIC_API_KEY (см. .env.example)")
+            model = env("CLAUDE_MODEL", "").strip() or "claude-haiku-5-5"
+        else:
+            raise SystemExit(f"AI={ai}: допустимо только gemini или claude")
+
         admins = frozenset(
-            int(x) for x in os.environ.get("ADMIN_IDS", "").replace(" ", "").split(",") if x
+            int(x) for x in env("ADMIN_IDS", "").replace(" ", "").split(",") if x
         )
         return cls(
             bot_token=token,
             admin_ids=admins,
-            model=os.environ.get("CLAUDE_MODEL", "claude-opus-5-5").strip(),
-            db_path=os.environ.get("DB_PATH", "zakup.db").strip(),
+            ai=ai,
+            model=model,
+            db_path=env("DB_PATH", "").strip() or "zakup.db",
+            gemini_api_key=env("GEMINI_API_KEY", "").strip(),
+            currency=env("CURRENCY", "").strip() or "₸",
         )

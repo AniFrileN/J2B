@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import openpyxl
 import pytest
 
-from zakup_bot.ai import Claude
+from zakup_bot.ai import AIError, Claude, Gemini
 from zakup_bot.bot import _pack
 from zakup_bot.db import DB
 from zakup_bot.excel import build_workbook
@@ -87,8 +87,8 @@ def test_xlsx_and_csv_chunks():
     csv_chunks = price_chunks("p.csv", "Товар;Цена\nЛук;40\n".encode("cp1251"))
     assert "Лук\t40" in csv_chunks[0].text
 
-    assert price_chunks("p.pdf", b"%PDF-1.4")[0].block["type"] == "document"
-    assert price_chunks("p.png", b"x")[0].block["type"] == "image"
+    assert price_chunks("p.pdf", b"%PDF-1.4")[0].mime == "application/pdf"
+    assert price_chunks("p.png", b"x")[0].mime == "image/png"
     assert text_chunks("а\n\nб")[0].text == "а\nб"
     with pytest.raises(UnsupportedFile):
         price_chunks("p.docx", b"x")
@@ -158,12 +158,57 @@ def test_claude_requests():
     assert "1 | Метро | Молоко 3,2% 1 л | шт | 95" in text
     assert "[Иван]\nмолоко 10 л" in text
 
+    calls.clear()
+    claude = Claude("claude-haiku-5-5", fake_client({"items": []}, calls))
+    asyncio.run(claude.extract_prices(price_chunks("p.pdf", b"%PDF"), "p.pdf"))
+    assert "fallbacks" not in calls[0]
+    block = calls[0]["messages"][0]["content"][0]
+    assert block["type"] == "document" and block["source"]["media_type"] == "application/pdf"
+
+
+class FakeGeminiModels:
+    def __init__(self, payloads):
+        self.payloads = list(payloads)
+        self.calls = []
+
+    async def generate_content(self, model, contents, config):
+        self.calls.append((model, contents, config))
+        p = self.payloads.pop(0)
+        if isinstance(p, Exception):
+            raise p
+        return SimpleNamespace(
+            candidates=[SimpleNamespace(finish_reason=SimpleNamespace(name="STOP"))],
+            text=json.dumps(p),
+        )
+
+
+def test_gemini_requests_and_retry():
+    from google.genai import errors
+
+    limit = errors.ClientError(429, {"error": {"code": 429, "message": "quota", "status": "RESOURCE_EXHAUSTED"}})
+    models = FakeGeminiModels([limit, {"items": [{"name": "Лук", "unit": "кг", "price": 40}]}])
+    gemini = Gemini("gemini-3.8-flash", "key", client=SimpleNamespace(aio=SimpleNamespace(models=models)))
+    gemini.retry_delays = (0,)
+    items = asyncio.run(gemini.extract_prices(price_chunks("p.png", b"img"), "p.png"))
+    assert items == [{"name": "Лук", "unit": "кг", "price": 40.0}]
+    model, contents, config = models.calls[-1]
+    assert model == "gemini-3.8-flash"
+    assert contents[0].inline_data.mime_type == "image/png"
+    assert config.response_mime_type == "application/json"
+    assert "additionalProperties" not in json.dumps(config.response_json_schema)
+
+    models = FakeGeminiModels([limit, limit])
+    gemini = Gemini("gemini-3.8-flash", "key", client=SimpleNamespace(aio=SimpleNamespace(models=models)))
+    gemini.retry_delays = (0,)
+    with pytest.raises(AIError, match="лимит"):
+        asyncio.run(gemini.match_order(CATALOG, [PendingMessage(1, "Иван", "лук")]))
+
 
 def test_pack_and_money():
     parts = _pack(["a" * 3000, "b" * 3000, "c" * 9000])
     assert all(len(p) <= 4000 for p in parts)
     assert "".join(p.replace("\n", "") for p in parts).count("c") == 9000
-    assert fmt_money(1234.5) == "1 234.5 ₽"
+    assert fmt_money(1234.5) == "1 234.5 ₸"
     assert fmt_money(None) == "—"
 
 

@@ -7,9 +7,12 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from . import planner
 from .models import Plan
 
-MONEY = '#,##0.00 "₽"'
+
+def _money_format() -> str:
+    return f'#,##0.00 "{planner.CURRENCY}"'
 HEADER_FILL = PatternFill("solid", fgColor="DDEBF7")
 SUPPLIER_FILL = PatternFill("solid", fgColor="FCE4D6")
 TOTAL_FILL = PatternFill("solid", fgColor="E2EFDA")
@@ -65,7 +68,7 @@ def _write_rows(ws, row: int, rows, full: bool) -> int:
             c.alignment = WRAP
             c.border = THIN
             if col in (4, 5):
-                c.number_format = MONEY
+                c.number_format = _money_format()
         row += 1
     return row
 
@@ -74,7 +77,7 @@ def _total(ws, row: int, label: str, amount: float, width: int) -> None:
     ws.cell(row=row, column=1, value=label).font = BOLD
     c = ws.cell(row=row, column=5, value=amount)
     c.font = BOLD
-    c.number_format = MONEY
+    c.number_format = _money_format()
     for col in range(1, width + 1):
         ws.cell(row=row, column=col).fill = TOTAL_FILL
 

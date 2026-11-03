@@ -1,6 +1,5 @@
 """Превращает присланный прайс (Excel, CSV, PDF, фото, текст) в куски для Claude."""
 
-import base64
 import csv
 import io
 from dataclasses import dataclass
@@ -22,10 +21,11 @@ class UnsupportedFile(Exception):
 
 @dataclass
 class PriceChunk:
-    """Либо текст (таблица построчно), либо готовый блок контента (PDF/картинка)."""
+    """Либо текст (таблица построчно), либо файл целиком (PDF/картинка)."""
 
     text: str | None = None
-    block: dict | None = None
+    data: bytes | None = None
+    mime: str | None = None
 
 
 def _ext(filename: str) -> str:
@@ -122,21 +122,10 @@ def price_chunks(filename: str, data: bytes, mime: str | None = None) -> list[Pr
     if ext == "txt":
         return text_chunks(decode_text(data))
     if ext == "pdf" or mime == "application/pdf":
-        b64 = base64.standard_b64encode(data).decode()
-        return [
-            PriceChunk(
-                block={
-                    "type": "document",
-                    "source": {"type": "base64", "media_type": "application/pdf", "data": b64},
-                }
-            )
-        ]
+        return [PriceChunk(data=data, mime="application/pdf")]
     media = IMAGE_TYPES.get(ext) or (mime if mime in IMAGE_TYPES.values() else None)
     if media:
-        b64 = base64.standard_b64encode(data).decode()
-        return [
-            PriceChunk(block={"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}})
-        ]
+        return [PriceChunk(data=data, mime=media)]
     raise UnsupportedFile(
         f"Не умею читать файлы .{ext or '?'}. Пришлите Excel, CSV, PDF, фото или текст."
     )
