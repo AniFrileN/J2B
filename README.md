@@ -36,14 +36,43 @@ Telegram-бот для общепита. Повара и бармены пишу
 2. **Получите ключ ИИ** (подробнее в разделе «Какой ИИ выбрать» ниже):
    - **Gemini (бесплатно):** откройте [aistudio.google.com](https://aistudio.google.com), войдите через Google-аккаунт и нажмите **Get API key**. Карта не нужна.
    - **Claude (платно):** [console.anthropic.com](https://console.anthropic.com) → API Keys, затем пополните баланс.
-3. **Установите Python 3.11 или новее** с [python.org](https://www.python.org/downloads/). При установке на Windows отметьте галочку **Add Python to PATH**.
+3. **Установите Python 3.10 или новее** с [python.org](https://www.python.org/downloads/). При установке на Windows отметьте галочку **Add Python to PATH**.
 4. **Скачайте проект** (на GitHub: Code → Download ZIP) и распакуйте.
 5. Скопируйте файл `.env.example` в `.env` и впишите `BOT_TOKEN` и ключ ИИ: `GEMINI_API_KEY` или `ANTHROPIC_API_KEY`. Для Claude также поменяйте строку `AI=gemini` на `AI=claude`.
-6. **Запустите:** на Windows дважды кликните `run.bat`, на Mac/Linux выполните `./run.sh`. Первый запуск ставит зависимости, это займёт минуту.
+6. **Запустите:** на Windows дважды кликните `run.bat`, на Ubuntu смотрите раздел «Ubuntu» ниже. Первый запуск ставит зависимости, это займёт минуту.
 7. Напишите боту `/start` в личке. Он покажет ваш Telegram ID. Впишите его в `ADMIN_IDS` в `.env` и перезапустите бота. Теперь только вы можете загружать прайсы и делать `/itog`. Несколько ID пишите через запятую.
 8. Добавьте бота в рабочую группу. Если бот уже был в группе до шага с `/setprivacy`, удалите его и добавьте заново.
 
 Бот работает, пока открыто окно `run.bat` и включён компьютер. Чтобы он работал круглосуточно, его можно перенести на недорогой сервер (VPS).
+
+## Ubuntu
+
+```bash
+sudo apt update && sudo apt install -y git python3-venv
+git clone -b ccr-a061dd1d-xro167 https://github.com/AniFrileN/J2B.git ~/zakup-bot
+cd ~/zakup-bot
+cp .env.example .env
+nano .env        # впишите токен и ключ, сохраните: Ctrl+O, Enter, Ctrl+X
+./run.sh         # запуск в окне терминала, остановка — Ctrl+C
+```
+
+### Ubuntu: автозапуск
+
+Чтобы бот работал в фоне, сам запускался после перезагрузки и перезапускался при сбоях:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp ~/zakup-bot/zakup-bot.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now zakup-bot
+sudo loginctl enable-linger $USER   # работать, даже когда вы не вошли в систему
+```
+
+Полезные команды:
+- `systemctl --user status zakup-bot` — работает ли бот;
+- `journalctl --user -u zakup-bot -f` — смотреть, что он пишет (выход — Ctrl+C);
+- `systemctl --user restart zakup-bot` — перезапуск после изменения `.env`;
+- `cd ~/zakup-bot && git pull && systemctl --user restart zakup-bot` — обновить бота.
 
 ## Какой ИИ выбрать
 

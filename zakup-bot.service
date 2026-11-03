@@ -1,0 +1,16 @@
+# Автозапуск бота в Ubuntu (пользовательская служба systemd).
+# Установка — см. README, раздел «Ubuntu: автозапуск».
+[Unit]
+Description=Telegram-бот закупок
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/zakup-bot
+ExecStartPre=/bin/sh -c '[ -d .venv ] || python3 -m venv .venv; .venv/bin/pip install -q -r requirements.txt'
+ExecStart=%h/zakup-bot/.venv/bin/python -m zakup_bot
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
