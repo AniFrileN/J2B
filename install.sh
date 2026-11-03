@@ -101,7 +101,7 @@ ExecStart=$DIR/.venv/bin/python -m zakup_bot
 Restart=always
 RestartSec=10
 # Не даём боту занять память сайта
-MemoryMax=400M
+MemoryMax=900M
 NoNewPrivileges=true
 
 [Install]

@@ -304,3 +304,25 @@ def test_gemini_hung_request_is_retried():
     assert asyncio.run(gemini.match_order(CATALOG, [PendingMessage(1, "Иван", "лук")])) == []
     assert len(models.calls) == 2
     assert models.calls  # order request does not use fast mode
+
+
+def test_pulse_updates_status_and_stops():
+    from zakup_bot import bot as botmod
+
+    edits = []
+
+    class Status:
+        async def edit_text(self, text):
+            edits.append(text)
+
+    async def run():
+        botmod.PULSE_SECONDS = 0.01
+        task = asyncio.create_task(botmod._pulse(Status(), lambda: "жив"))
+        await asyncio.sleep(0.05)
+        task.cancel()
+        n = len(edits)
+        await asyncio.sleep(0.05)
+        return n
+
+    n = asyncio.run(run())
+    assert n >= 2 and len(edits) == n and edits[0] == "жив"

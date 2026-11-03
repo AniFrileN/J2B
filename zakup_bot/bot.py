@@ -159,20 +159,33 @@ class App:
         if not chunks:
             await message.answer("В файле не нашлось данных.")
             return
-        parts = f", {plural(len(chunks), 'часть', 'части', 'частей')}" if len(chunks) > 1 else ""
+        total = len(chunks)
+        parts = f", {plural(total, 'часть', 'части', 'частей')}" if total > 1 else ""
         status = await message.answer(f"Читаю прайс «{s.supplier}»{parts}… Это может занять пару минут.")
+        state = {"done": 0}
 
-        async def progress(done: int, total: int) -> None:
-            await status.edit_text(f"Читаю прайс «{s.supplier}»: готово {done} из {total}…")
+        def status_text() -> str:
+            done = f", готово {state['done']} из {total}" if total > 1 else ""
+            return f"Читаю прайс «{s.supplier}»{done}… прошло {_elapsed(started)}"
 
+        async def progress(done: int, _total: int) -> None:
+            state["done"] = done
+            await _safe_edit(status, status_text())
+
+        started = time.monotonic()
+        pulse = asyncio.create_task(_pulse(status, status_text))
+        error = None
         try:
             items = await self.ai.extract_prices(chunks, filename, progress)
         except AIError as e:
-            await status.edit_text(f"Не получилось прочитать прайс: {e}")
-            return
+            error = f"Не получилось прочитать прайс: {e}"
         except Exception:
             log.exception("price parse failed")
-            await status.edit_text("Не получилось прочитать прайс, попробуйте другой формат.")
+            error = "Не получилось прочитать прайс, попробуйте другой формат."
+        finally:
+            pulse.cancel()
+        if error:
+            await status.edit_text(error)
             return
         if not items:
             await status.edit_text("Не нашёл в этом прайсе ни одной позиции.")
@@ -262,9 +275,13 @@ class App:
             return
 
         self.busy_chats.add(chat_id)
-        status = await message.answer(f"Разбираю {plural(len(pending), 'сообщение', 'сообщения', 'сообщений')}…")
+        what = f"Разбираю {plural(len(pending), 'сообщение', 'сообщения', 'сообщений')}"
+        status = await message.answer(f"{what}…")
+        started = time.monotonic()
+        pulse = asyncio.create_task(_pulse(status, lambda: f"{what}… прошло {_elapsed(started)}"))
         try:
             lines = await self.ai.match_order(catalog, pending)
+            pulse.cancel()
             plan = build_plan(lines, catalog)
             if not plan.by_supplier and not plan.unmatched:
                 await status.edit_text("Не нашёл в сообщениях ни одной позиции для заказа.")
@@ -288,12 +305,37 @@ class App:
             self.db.delete_pending(chat_id, [m.message_id for m in pending])
             await status.edit_text(f"Готово. Учёл {plural(len(pending), 'сообщение', 'сообщения', 'сообщений')}, списки обнулены.")
         except AIError as e:
+            pulse.cancel()
             await status.edit_text(f"Не получилось собрать заказ: {e}\nСписки сохранены, попробуйте /itog ещё раз.")
         except Exception:
+            pulse.cancel()
             log.exception("itog failed")
             await status.edit_text("Что-то пошло не так. Списки сохранены, попробуйте /itog ещё раз.")
         finally:
+            pulse.cancel()
             self.busy_chats.discard(chat_id)
+
+
+PULSE_SECONDS = 30
+
+
+def _elapsed(started: float) -> str:
+    sec = int(time.monotonic() - started)
+    return f"{sec // 60} мин {sec % 60:02d} с" if sec >= 60 else f"{sec} с"
+
+
+async def _safe_edit(message: Message, text: str) -> None:
+    try:
+        await message.edit_text(text)
+    except Exception:
+        log.debug("edit failed", exc_info=True)
+
+
+async def _pulse(message: Message, text) -> None:
+    """Раз в PULSE_SECONDS обновляет сообщение, чтобы было видно, что бот жив."""
+    while True:
+        await asyncio.sleep(PULSE_SECONDS)
+        await _safe_edit(message, text())
 
 
 def plural(n: int, one: str, few: str, many: str) -> str:
