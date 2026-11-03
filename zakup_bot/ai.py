@@ -311,6 +311,8 @@ class Gemini(AIClient):
                 system_instruction=system,
                 response_mime_type="application/json",
                 response_json_schema=_gemini_schema(schema),
+                # инструменты не используем — и без лишних строк «AFC is enabled» в журнале
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
                 **extra,
             )
 
