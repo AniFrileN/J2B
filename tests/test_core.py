@@ -326,3 +326,22 @@ def test_pulse_updates_status_and_stops():
 
     n = asyncio.run(run())
     assert n >= 2 and len(edits) == n and edits[0] == "жив"
+
+
+def test_order_is_saved_and_restored(tmp_path):
+    from zakup_bot.models import Plan
+
+    lines = [
+        {"requested": "молоко", "author": "Иван", "quantity_text": "5 л",
+         "candidates": [{"item_id": 2, "quantity": 1}, {"item_id": 1, "quantity": 5}], "comment": "к"},
+        {"requested": "икра", "author": "Шеф", "quantity_text": "", "candidates": [], "comment": ""},
+    ]
+    plan = build_plan(lines, CATALOG)
+    db = DB(str(tmp_path / "t.db"))
+    order_id = db.save_order(-100, "Заказ", plan.to_dict())
+    chat_id, title, data = db.get_order(order_id)
+    restored = Plan.from_dict(data)
+    assert (chat_id, title) == (-100, "Заказ")
+    assert restored == plan
+    assert restored.grand_total == plan.grand_total
+    assert db.get_order(order_id + 1) is None

@@ -10,7 +10,14 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.enums import ChatType
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BotCommand, BufferedInputFile, Message
+from aiogram.types import (
+    BotCommand,
+    BufferedInputFile,
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from .ai import AIClient, AIError, Claude, Gemini
 from .config import Config
@@ -18,7 +25,8 @@ from .db import DB
 from .excel import build_workbook
 from .files import UnsupportedFile, price_chunks, text_chunks
 from . import planner
-from .planner import build_plan, fmt_money, supplier_messages
+from .models import Plan
+from .planner import build_plan, fmt_money, summary_text, supplier_messages
 
 log = logging.getLogger(__name__)
 
@@ -30,7 +38,7 @@ HELP = """Я раскладываю списки закупок по поста�
 Как пользоваться:
 1. Управляющий загружает прайсы в личке со мной: /price Название поставщика, затем присылает Excel, PDF, фото или текст прайса. Новый прайс заменяет старый у этого поставщика.
 2. Повара и бармены пишут в общую группу, что нужно купить, как обычно.
-3. Когда пора заказывать, пишите в группе /itog. Пришлю Excel с разбивкой по поставщикам (беру где дешевле) и готовые тексты для каждого поставщика.
+3. Когда пора заказывать, пишите в группе /itog. Я разложу всё по поставщикам (беру где дешевле) и предложу, в каком виде прислать заказ: Excel-таблицей, одним сообщением или отдельным сообщением для каждого поставщика.
 
 Команды:
 /itog — собрать заказ из всех списков и обнулить их
@@ -81,6 +89,7 @@ class App:
         r.message.register(self.cmd_itog, Command("itog"))
         r.message.register(self.cmd_list, Command("list"))
         r.message.register(self.cmd_clear, Command("clear"))
+        r.callback_query.register(self.on_format, F.data.startswith("fmt:"))
         r.message.register(self.on_private_content, F.chat.type == ChatType.PRIVATE, self._has_session)
         r.message.register(self.on_text, F.text, ~F.text.startswith("/"))
         r.edited_message.register(self.on_edit, F.text)
@@ -257,6 +266,43 @@ class App:
         self.db.delete_pending(message.chat.id)
         await message.answer("Собранные списки удалены.")
 
+    async def on_format(self, callback: CallbackQuery) -> None:
+        try:
+            _, order_id, kind = callback.data.split(":")
+            order = self.db.get_order(int(order_id))
+        except ValueError:
+            order = None
+        if order is None or kind not in FORMATS:
+            await callback.answer("Этот заказ устарел, соберите новый: /itog", show_alert=True)
+            return
+        if not self.is_admin(callback.from_user.id):
+            await callback.answer("Получить заказ может только управляющий.", show_alert=True)
+            return
+        await callback.answer()
+        chat_id, title, data = order
+        plan = Plan.from_dict(data)
+        bot = callback.bot
+        target = callback.message.chat.id if callback.message else chat_id
+
+        if kind == "xlsx":
+            stamp = title.removeprefix("Заказ от ").replace(".", "-").replace(":", "-").replace(" ", "_")
+            filename = f"zakaz_{stamp or order_id}.xlsx"
+            await bot.send_document(
+                target,
+                BufferedInputFile(build_workbook(plan, title), filename),
+                caption=summary_text(plan, title)[:1000],
+            )
+        elif kind == "one":
+            for chunk in _pack([title, *supplier_messages(plan)]):
+                await bot.send_message(target, chunk)
+        else:
+            texts = supplier_messages(plan)
+            if not texts:
+                await bot.send_message(target, "В заказе нет позиций.")
+            for text in texts:
+                for chunk in _pack([text]):
+                    await bot.send_message(target, chunk)
+
     async def cmd_itog(self, message: Message) -> None:
         chat_id = message.chat.id
         if not self.is_admin(message.from_user.id):
@@ -286,24 +332,15 @@ class App:
             if not plan.by_supplier and not plan.unmatched:
                 await status.edit_text("Не нашёл в сообщениях ни одной позиции для заказа.")
                 return
-            stamp = datetime.now().strftime("%d.%m.%Y %H:%M")
-            xlsx = build_workbook(plan, f"Заказ от {stamp}")
-            filename = f"zakaz_{datetime.now():%Y-%m-%d_%H-%M}.xlsx"
-            summary = [f"Заказ от {stamp}"]
-            for supplier, rows in plan.by_supplier.items():
-                summary.append(
-                    f"• {supplier}: {len(rows)} поз., ≈ {fmt_money(plan.supplier_total(supplier))}"
-                )
-            summary.append(f"Итого ≈ {fmt_money(plan.grand_total)}")
-            if plan.unmatched:
-                summary.append(f"Не нашёл в прайсах: {len(plan.unmatched)} поз.")
-            await message.answer_document(
-                BufferedInputFile(xlsx, filename), caption="\n".join(summary)[:1000]
-            )
-            for chunk in _pack(supplier_messages(plan)):
-                await message.answer(chunk)
+            title = f"Заказ от {datetime.now():%d.%m.%Y %H:%M}"
+            order_id = self.db.save_order(chat_id, title, plan.to_dict())
             self.db.delete_pending(chat_id, [m.message_id for m in pending])
-            await status.edit_text(f"Готово. Учёл {plural(len(pending), 'сообщение', 'сообщения', 'сообщений')}, списки обнулены.")
+            counted = plural(len(pending), "сообщение", "сообщения", "сообщений")
+            await status.edit_text(
+                f"{summary_text(plan, title)}\n\nУчёл {counted}, списки обнулены.\n"
+                "В каком виде прислать заказ?",
+                reply_markup=format_keyboard(order_id),
+            )
         except AIError as e:
             pulse.cancel()
             await status.edit_text(f"Не получилось собрать заказ: {e}\nСписки сохранены, попробуйте /itog ещё раз.")
@@ -317,6 +354,21 @@ class App:
 
 
 PULSE_SECONDS = 30
+
+FORMATS = {
+    "xlsx": "📊 Excel-таблица",
+    "one": "💬 Одним сообщением",
+    "each": "📨 По поставщикам",
+}
+
+
+def format_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=label, callback_data=f"fmt:{order_id}:{kind}")]
+            for kind, label in FORMATS.items()
+        ]
+    )
 
 
 def _elapsed(started: float) -> str:
@@ -410,7 +462,7 @@ async def _run(bot: Bot, dp: Dispatcher) -> None:
         ]
     )
     log.info("Бот запущен")
-    await dp.start_polling(bot, allowed_updates=["message", "edited_message"])
+    await dp.start_polling(bot, allowed_updates=["message", "edited_message", "callback_query"])
 
 
 if __name__ == "__main__":

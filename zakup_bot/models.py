@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 
 @dataclass
@@ -54,3 +54,16 @@ class Plan:
     @property
     def grand_total(self) -> float:
         return sum(self.supplier_total(s) for s in self.by_supplier)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Plan":
+        by_supplier = {
+            supplier: [
+                OrderRow(**{**row, "item": CatalogItem(**row["item"])}) for row in rows
+            ]
+            for supplier, rows in data["by_supplier"].items()
+        }
+        return cls(by_supplier, [Unmatched(**u) for u in data["unmatched"]])

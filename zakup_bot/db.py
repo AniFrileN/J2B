@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import time
 
@@ -21,7 +22,16 @@ CREATE TABLE IF NOT EXISTS pending (
     created_at REAL NOT NULL,
     PRIMARY KEY (chat_id, message_id)
 );
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY,
+    chat_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 """
+
+ORDER_TTL = 60 * 24 * 3600  # готовые заказы храним 60 дней
 
 
 class DB:
@@ -67,6 +77,26 @@ class DB:
             "SELECT id, supplier, name, unit, price FROM items ORDER BY supplier, name"
         )
         return [CatalogItem(*r) for r in rows]
+
+    # --- готовые заказы ---
+
+    def save_order(self, chat_id: int, title: str, data: dict) -> int:
+        now = time.time()
+        with self.conn:
+            self.conn.execute("DELETE FROM orders WHERE created_at < ?", (now - ORDER_TTL,))
+            cur = self.conn.execute(
+                "INSERT INTO orders (chat_id, title, data, created_at) VALUES (?, ?, ?, ?)",
+                (chat_id, title, json.dumps(data, ensure_ascii=False), now),
+            )
+        return cur.lastrowid
+
+    def get_order(self, order_id: int) -> tuple[int, str, dict] | None:
+        row = self.conn.execute(
+            "SELECT chat_id, title, data FROM orders WHERE id = ?", (order_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return row[0], row[1], json.loads(row[2])
 
     # --- собранные списки ---
 

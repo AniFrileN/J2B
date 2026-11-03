@@ -79,6 +79,17 @@ def build_plan(lines: list[dict], catalog: list[CatalogItem]) -> Plan:
     return Plan(by_supplier=by_supplier, unmatched=unmatched)
 
 
+def summary_text(plan: Plan, title: str) -> str:
+    lines = [title]
+    for supplier, rows in plan.by_supplier.items():
+        lines.append(f"• {supplier}: {len(rows)} поз., ≈ {fmt_money(plan.supplier_total(supplier))}")
+    if plan.by_supplier:
+        lines.append(f"Итого ≈ {fmt_money(plan.grand_total)}")
+    if plan.unmatched:
+        lines.append(f"Не нашёл в прайсах: {len(plan.unmatched)} поз.")
+    return "\n".join(lines)
+
+
 def supplier_messages(plan: Plan) -> list[str]:
     """Тексты, которые удобно переслать поставщику (по одному на поставщика)."""
     texts = []
