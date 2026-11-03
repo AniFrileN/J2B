@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -303,8 +304,8 @@ class App:
         target = callback.message.chat.id if callback.message else chat_id
 
         if kind == "xlsx":
-            stamp = title.removeprefix("Заказ от ").replace(".", "-").replace(":", "-").replace(" ", "_")
-            filename = f"zakaz_{stamp or order_id}.xlsx"
+            safe = re.sub(r"[^\w.-]+", "_", title.removeprefix("Заказ ")).strip("_")
+            filename = f"zakaz_{safe or order_id}.xlsx"
             await bot.send_document(
                 target,
                 BufferedInputFile(build_workbook(plan, title), filename),
@@ -350,7 +351,8 @@ class App:
             if not plan.by_supplier and not plan.unmatched:
                 await status.edit_text("Не нашёл в сообщениях ни одной позиции для заказа.")
                 return
-            title = f"Заказ от {datetime.now():%d.%m.%Y %H:%M}"
+            point = f"«{message.chat.title}» " if message.chat.title else ""
+            title = f"Заказ {point}от {datetime.now():%d.%m.%Y %H:%M}"
             order_id = self.db.save_order(chat_id, title, plan.to_dict())
             self.db.delete_pending(chat_id, [m.message_id for m in pending])
             counted = plural(len(pending), "сообщение", "сообщения", "сообщений")
